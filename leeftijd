@@ -1,0 +1,23 @@
+#include <iostream>
+#include <sstream>
+#include <string>
+
+using namespace std;
+
+int main () {
+
+    int Number;
+    string name;
+    int leeftijd; 
+
+    cout << "Wat is uw naam?:";
+    cin >> name;
+
+    cout << "Hoe oud ben u?";
+    cin >> Number;
+
+    leeftijd = 2026-Number;
+
+    cout << "bonjoor, " << name << "U bent" << leeftijd << "in 2026 op maandag 9 sebtember"; 
+
+}
