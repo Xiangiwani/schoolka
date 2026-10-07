@@ -9,7 +9,7 @@ int main () {
     cout << "Wat is je naampje?"; 
     cin >> naam;
 
-    cout << "Hey " << naam << " leuk je gekent te hebben";
+    cout << "Hey " << naam << " leuk je gekent te hebben \n tot nooit meer dan he";
 
     return 0;
 
