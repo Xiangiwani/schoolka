@@ -1,0 +1,165 @@
+
+
+#include <sys/inotify.h>
+#include <poll.h>
+#include <unistd.h>
+
+#include <csignal>
+#include <cstring>
+#include <filesystem>
+#include <iostream>
+#include <map>
+#include <set>
+#include <string>
+
+namespace fs = std::filesystem;
+
+static const fs::path WATCH_DIR  = "/home/xiang/Dosktop/main";
+static const fs::path BACKUP_DIR = "/home/xiang/Dosktop/backup";
+static const int DEBOUNCE_MS = 500;  // wacht even zodat meerdere saves 1 backup worden
+
+static volatile sig_atomic_t running = 1;
+static void stop(int) { running = 0; }
+
+static const uint32_t MASK = IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE;
+
+// Tijdelijke bestanden van editors negeren
+static bool isTempFile(const std::string& name) {
+    if (name.empty()) return true;
+    if (name.back() == '~') return true;
+    if (name.rfind(".#", 0) == 0) return true;
+    auto ends = [&](const char* s) {
+        std::string e(s);
+        return name.size() >= e.size() &&
+               name.compare(name.size() - e.size(), e.size(), e) == 0;
+    };
+    return ends(".swp") || ends(".swx") || ends(".tmp") || ends(".part");
+}
+
+static void addWatchRecursive(int fd, const fs::path& dir,
+                              std::map<int, fs::path>& wds) {
+    int wd = inotify_add_watch(fd, dir.c_str(), MASK);
+    if (wd >= 0) {
+        wds[wd] = dir;
+    } else {
+        std::cerr << "Kan map niet volgen: " << dir << " (" << std::strerror(errno) << ")\n";
+        return;
+    }
+    std::error_code ec;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code ec2;
+        if (it->is_directory(ec2) && !it->is_symlink(ec2)) {
+            addWatchRecursive(fd, it->path(), wds);
+        }
+    }
+}
+
+// Backup van alleen de bestanden direct in 'dir' (niet de submappen)
+static void backupDir(const fs::path& dir) {
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return;
+
+    fs::path rel = fs::relative(dir, WATCH_DIR, ec);
+    if (ec) return;
+    fs::path dest = BACKUP_DIR / rel;
+
+    fs::create_directories(dest, ec);
+    if (ec) {
+        std::cerr << "Kan backupmap niet maken: " << dest << "\n";
+        return;
+    }
+
+    int count = 0;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code ec2;
+        if (!it->is_regular_file(ec2)) continue;
+        if (isTempFile(it->path().filename().string())) continue;
+        fs::copy_file(it->path(), dest / it->path().filename(),
+                      fs::copy_options::overwrite_existing, ec2);
+        if (ec2) {
+            std::cerr << "Fout bij kopieren van " << it->path() << ": " << ec2.message() << "\n";
+        } else {
+            ++count;
+        }
+    }
+    std::cout << "Backup: " << dir << " -> " << dest << " (" << count << " bestanden)\n";
+}
+
+int main() {
+    std::signal(SIGINT, stop);
+    std::signal(SIGTERM, stop);
+
+    std::error_code ec;
+    if (!fs::is_directory(WATCH_DIR, ec)) {
+        std::cerr << "Map bestaat niet: " << WATCH_DIR << "\n";
+        return 1;
+    }
+    fs::create_directories(BACKUP_DIR, ec);
+
+    int fd = inotify_init1(IN_CLOEXEC);
+    if (fd < 0) {
+        std::cerr << "inotify_init mislukt: " << std::strerror(errno) << "\n";
+        return 1;
+    }
+
+    std::map<int, fs::path> wds;
+    addWatchRecursive(fd, WATCH_DIR, wds);
+    std::cout << "Volgt " << wds.size() << " mappen in " << WATCH_DIR
+              << "\nBackups gaan naar " << BACKUP_DIR << "\nStoppen met Ctrl+C\n";
+
+    std::set<fs::path> pending;
+    alignas(inotify_event) char buf[64 * 1024];
+
+    while (running) {
+        pollfd pfd{fd, POLLIN, 0};
+        int timeout = pending.empty() ? -1 : DEBOUNCE_MS;
+        int r = poll(&pfd, 1, timeout);
+
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        if (r == 0) {
+            // Even stil geweest: backups uitvoeren
+            for (const auto& d : pending) backupDir(d);
+            pending.clear();
+            continue;
+        }
+
+        ssize_t len = read(fd, buf, sizeof(buf));
+        if (len <= 0) continue;
+
+        for (char* p = buf; p < buf + len;) {
+            auto* ev = reinterpret_cast<inotify_event*>(p);
+            p += sizeof(inotify_event) + ev->len;
+
+            if (ev->mask & IN_IGNORED) {
+                wds.erase(ev->wd);
+                continue;
+            }
+            auto it = wds.find(ev->wd);
+            if (it == wds.end() || ev->len == 0) continue;
+
+            fs::path dir  = it->second;
+            std::string name = ev->name;
+            fs::path full = dir / name;
+
+            if (ev->mask & IN_ISDIR) {
+                // Nieuwe (of verplaatste) map: ook volgen
+                if (ev->mask & (IN_CREATE | IN_MOVED_TO)) {
+                    addWatchRecursive(fd, full, wds);
+                }
+                continue;
+            }
+
+            if (ev->mask & (IN_CLOSE_WRITE | IN_MOVED_TO)) {
+                if (!isTempFile(name)) pending.insert(dir);
+            }
+        }
+    }
+
+    close(fd);
+    std::cout << "Gestopt.\n";
+    return 0;
+}
