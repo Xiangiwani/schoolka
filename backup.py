@@ -2,8 +2,8 @@
 """Back-upscript: zipt een bronmap naar een back-upmap.
 
 - Maakt per run één gecomprimeerd zip-bestand (ZIP_DEFLATED) met tijdstempel.
-- Slaat de back-up over als er niets veranderd is sinds de laatste back-up.
-- Bewaart alleen de nieuwste MAX_BACKUPS zip-bestanden om opslag te besparen.
+- Elke run maakt een nieuwe zip (optioneel overslaan bij geen wijzigingen).
+- Bewaart alleen de nieuwste MAX_BACKUPS (10) zip-bestanden, de oudste wordt verwijderd om opslag te besparen.
 - Schrijft alles naar een logbestand en handelt fouten af.
 """
 
@@ -18,7 +18,9 @@ from pathlib import Path
 # Pas deze paden aan, of zet ze als omgevingsvariabele.
 SOURCE_DIR = Path(os.environ.get("BACKUP_SOURCE", Path.home() / "Documenten"))
 BACKUP_DIR = Path(os.environ.get("BACKUP_DEST", Path.home() / "backup"))
-MAX_BACKUPS = int(os.environ.get("BACKUP_KEEP", 5))
+MAX_BACKUPS = int(os.environ.get("BACKUP_KEEP", 10))
+# Overslaan als er niets veranderd is? 1 = ja, 0 = nee (elke run maakt een zip)
+SKIP_UNCHANGED = os.environ.get("BACKUP_SKIP_UNCHANGED", "0") == "1"
 # Bijv. USB-stick: BACKUP_DEST=/media/pi/USB/backup
 # ----------------------------------------------
 
@@ -96,7 +98,7 @@ def main() -> int:
         return 1
 
     backups = existing_backups()
-    if backups and newest_mtime(SOURCE_DIR) <= backups[-1].stat().st_mtime:
+    if SKIP_UNCHANGED and backups and newest_mtime(SOURCE_DIR) <= backups[-1].stat().st_mtime:
         logging.info("Geen wijzigingen sinds de laatste back-up, overgeslagen.")
         return 0
 
